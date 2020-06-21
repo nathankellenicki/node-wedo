@@ -20,9 +20,9 @@ export class WeDo extends EventEmitter {
 
     public state: Consts.State = Consts.State.NOT_READY;
 
-    private _device: HID.Device | undefined;
-    private _hid: HID.HID | undefined;
-    private _hubId: string;
+    private _path: string | undefined;
+    private _hidDevice: HID.HID | undefined;
+    private _id: string;
     private _messageBuffer: Buffer = Buffer.alloc(0);
 
     private _sensorValues: number[] = new Array(2).fill(0);
@@ -44,7 +44,7 @@ export class WeDo extends EventEmitter {
     }
 
 
-    constructor (hubId?: string) {
+    constructor (id?: string) {
         super();
         const devices = HID
             .devices()
@@ -52,32 +52,32 @@ export class WeDo extends EventEmitter {
         let tempDevice;
         for (const device of devices) {
             const tempHubId = WeDo._makeHubId(device);
-            if (!hubId || hubId === tempHubId) {
+            if (!id || id === tempHubId) {
                 tempDevice = device;
             }
         }
         if (!tempDevice) {
             throw new Error("No WeDo hub found");
         }
-        this._hubId = WeDo._makeHubId(tempDevice);
-        this._device = tempDevice;
+        this._id = WeDo._makeHubId(tempDevice);
+        this._path = tempDevice.path;
     }
 
 
     get id () {
-        return this._hubId;
+        return this._id;
     }
 
 
     public connect () {
         // @ts-ignore
-        this._hid = new HID.HID(this._device.path);
-        this._hid.on("data", this._handleIncomingData.bind(this));
+        this._hidDevice = new HID.HID(this._path);
+        this._hidDevice.on("data", this._handleIncomingData.bind(this));
     }
 
 
     public setPower (port: string, power: number) {
-        if (!this._hid) {
+        if (!this._hidDevice) {
             throw new Error("WeDo hub not connected");
         }
         if (0 < power && power <= 100) {
@@ -87,11 +87,8 @@ export class WeDo extends EventEmitter {
             power = Math.ceil(power * MAX_POWER / 100);
           }
         this._motorValues[port === "A" ? 0 : 1] = power;
-        const message = [0x0, 0x40,
-            this._motorValues[0] & 0xff,
-            this._motorValues[1] & 0xff,
-            0x00, 0x00, 0x00, 0x00, 0x00];
-            this._hid.write(message);
+        const message = [0x0, 0x40, this._motorValues[0] & 0xff, this._motorValues[1] & 0xff, 0x00, 0x00, 0x00, 0x00, 0x00];
+            this._hidDevice.write(message);
     }
 
 
