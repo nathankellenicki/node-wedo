@@ -22,7 +22,7 @@ export class WeDo extends EventEmitter {
 
     private _path: string | undefined;
     private _hidDevice: HID.HID | undefined;
-    private _id: string;
+    private _id: string | undefined;
     private _messageBuffer: Buffer = Buffer.alloc(0);
 
     private _sensorValues: number[] = new Array(2).fill(0);
@@ -46,21 +46,7 @@ export class WeDo extends EventEmitter {
 
     constructor (id?: string) {
         super();
-        const devices = HID
-            .devices()
-            .filter((device) => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID);
-        let tempDevice;
-        for (const device of devices) {
-            const tempHubId = WeDo._makeHubId(device);
-            if (!id || id === tempHubId) {
-                tempDevice = device;
-            }
-        }
-        if (!tempDevice) {
-            throw new Error("No WeDo hub found");
-        }
-        this._id = WeDo._makeHubId(tempDevice);
-        this._path = tempDevice.path;
+        this._id = id;
     }
 
 
@@ -70,7 +56,22 @@ export class WeDo extends EventEmitter {
 
 
     public connect () {
-        // @ts-ignore
+        const devices = HID
+            .devices()
+            .filter((device) => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID);
+        let tempDevice;
+        console.log(this._id);
+        for (const device of devices) {
+            const tempHubId = WeDo._makeHubId(device);
+            if (!this._id || this._id === tempHubId) {
+                tempDevice = device;
+            }
+        }
+        if (!tempDevice) {
+            throw new Error("WeDo hub not found");
+        }
+        this._id = WeDo._makeHubId(tempDevice);
+        this._path = tempDevice.path as string;
         this._hidDevice = new HID.HID(this._path);
         this._hidDevice.on("data", this._handleIncomingData.bind(this));
     }
@@ -107,12 +108,9 @@ export class WeDo extends EventEmitter {
                 this._messageBuffer = Buffer.concat([this._messageBuffer, data]);
             }
         }
-
         if (this._messageBuffer.length <= 0) {
             return;
         }
-
-
         if (this._messageBuffer.length >= MESSAGE_LENGTH) {
             const message = this._messageBuffer.slice(0, MESSAGE_LENGTH);
             this._messageBuffer = this._messageBuffer.slice(MESSAGE_LENGTH);
@@ -132,23 +130,26 @@ export class WeDo extends EventEmitter {
 
     private _parseSensorData(port: number, type: number, data: number) {
         if (this._sensorValues[port] !== data) {
-            this._sensorValues[port] = data;
             const portName = port === 0 ? "A" : "B";
             if (DISTANCE_SENSOR_IDS.indexOf(type) >= 0) {
+                this._sensorValues[port] = data;
                 this.emit("distance", portName, data);
                 return;
             }
             if (TILT_SENSOR_IDS.indexOf(type) >= 0) {
+                let tilt = Consts.TiltEvent.NONE;
                 if (10 <= data && data <= 40) {
-                    this.emit("tilt", portName, Consts.TiltEvent.BACK);
+                    tilt = Consts.TiltEvent.BACK;
                 } else if (60 <= data && data <= 90) {
-                    this.emit("tilt", portName, Consts.TiltEvent.RIGHT);
+                    tilt = Consts.TiltEvent.RIGHT;
                 } else if (170 <= data && data <= 190) {
-                    this.emit("tilt", portName, Consts.TiltEvent.FORWARD);
+                    tilt = Consts.TiltEvent.FORWARD;
                 } else if (220 <= data && data <= 240) {
-                    this.emit("tilt", portName, Consts.TiltEvent.LEFT);
-                } else {
-                    this.emit("tilt", portName, Consts.TiltEvent.NONE);
+                    tilt = Consts.TiltEvent.LEFT;
+                }
+                if (this._sensorValues[port] !== tilt) {
+                    this._sensorValues[port] = tilt;
+                    this.emit("tilt", portName, tilt);
                 }
                 return;
             }
