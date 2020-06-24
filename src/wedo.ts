@@ -33,13 +33,13 @@ export class WeDo extends EventEmitter {
         return HID
             .devices()
             .filter((device) => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID)
-            .map((device) => this._makeHubId(device));
+            .map((device) => WeDo._makeId(device.path as string));
     }
 
 
-    static _makeHubId (device: HID.Device) {
+    static _makeId (path: string) {
         const shasum = crypto.createHash("sha1");
-        shasum.update(device.path as string);
+        shasum.update(path as string);
         return shasum.digest("hex");
     }
 
@@ -60,9 +60,8 @@ export class WeDo extends EventEmitter {
             .devices()
             .filter((device) => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID);
         let tempDevice;
-        console.log(this._id);
         for (const device of devices) {
-            const tempHubId = WeDo._makeHubId(device);
+            const tempHubId = WeDo._makeId(device.path as string);
             if (!this._id || this._id === tempHubId) {
                 tempDevice = device;
             }
@@ -70,7 +69,7 @@ export class WeDo extends EventEmitter {
         if (!tempDevice) {
             throw new Error("WeDo hub not found");
         }
-        this._id = WeDo._makeHubId(tempDevice);
+        this._id = WeDo._makeId(tempDevice.path as string);
         this._path = tempDevice.path as string;
         this._hidDevice = new HID.HID(this._path);
         this._hidDevice.on("data", this._handleIncomingData.bind(this));
@@ -133,7 +132,7 @@ export class WeDo extends EventEmitter {
             const portName = port === 0 ? "A" : "B";
             if (DISTANCE_SENSOR_IDS.indexOf(type) >= 0) {
                 this._sensorValues[port] = data;
-                this.emit("distance", portName, data);
+                this.emit("distance", portName, { distance: data });
                 return;
             }
             if (TILT_SENSOR_IDS.indexOf(type) >= 0) {
@@ -149,7 +148,7 @@ export class WeDo extends EventEmitter {
                 }
                 if (this._sensorValues[port] !== tilt) {
                     this._sensorValues[port] = tilt;
-                    this.emit("tilt", portName, tilt);
+                    this.emit("tilt", portName, { tilt });
                 }
                 return;
             }
