@@ -62,11 +62,11 @@ export class WeDoConnection extends EventEmitter {
     this.cleanup(true);
   }
 
-  public sendMotorPower(motorA: number, motorB: number): void {
+  public sendMotorPower(outputBits: number, motorA: number, motorB: number): void {
     if (!this.device || this.state !== WeDoState.Ready) {
       throw new Error("WeDo connection is not ready");
     }
-    const command: MotorCommand = createMotorCommand(motorA, motorB);
+    const command: MotorCommand = createMotorCommand(outputBits, motorA, motorB);
     this.device.write(encodeMotorCommand(command));
   }
 
@@ -90,7 +90,6 @@ export class WeDoConnection extends EventEmitter {
   }
 
   private handleIncomingData(data?: Buffer): void {
-    // console.log(data);
     if (data && data.length > 0) {
       this.buffer = Buffer.concat([this.buffer, data]);
     }

@@ -9,7 +9,9 @@ export const PORTS = ["A", "B"] as const;
 export type PortId = (typeof PORTS)[number];
 
 export const MAX_MOTOR_POWER = 127;
-export const MOTOR_COMMAND_ID = 0x40;
+
+/** Control bit for high power motor output (requires 500mA USB) */
+export const HUB_CTL_BIT_HIGH_POWER = 0x40;
 
 export enum WeDoState {
   NotReady = 0,

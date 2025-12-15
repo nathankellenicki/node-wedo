@@ -5,6 +5,7 @@ import {
   DISTANCE_SENSOR_MAX_VALUE,
   DISTANCE_SENSOR_RAW_MAX,
   DISTANCE_SENSOR_RAW_MIN,
+  HUB_CTL_BIT_HIGH_POWER,
   MAX_MOTOR_POWER,
   PORTS,
   SensorType,
@@ -26,6 +27,8 @@ export interface DiscoverOptions {
 export interface WeDoOptions extends DiscoverOptions {
   id?: string;
   path?: string;
+  /** Enable high power motor output (requires 500mA USB port). Default: false */
+  highPower?: boolean;
 }
 
 export interface WeDoDeviceInfo {
@@ -82,11 +85,13 @@ export class WeDo extends EventEmitter {
     A: 0,
     B: 0
   };
+  private outputBits = 0;
   private connectedDevice?: WeDoDeviceInfo;
 
   constructor(options: WeDoOptions = {}) {
     super();
     this.baseOptions = { ...options };
+    this.outputBits = options.highPower ? HUB_CTL_BIT_HIGH_POWER : 0;
     this.handleSensorNotificationBound = (notification: SensorNotification) => {
       this.handleSensorNotification(notification);
     };
@@ -158,7 +163,7 @@ export class WeDo extends EventEmitter {
     const portId = this.normalizePort(port);
     const rawPower = this.normalizePower(power);
     this.motorValues[portId] = rawPower;
-    this.connection.sendMotorPower(this.motorValues.A, this.motorValues.B);
+    this.connection.sendMotorPower(this.outputBits, this.motorValues.A, this.motorValues.B);
   }
 
   public sleep(delay: number): Promise<void> {

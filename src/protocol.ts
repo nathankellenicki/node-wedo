@@ -1,5 +1,4 @@
 import {
-  MOTOR_COMMAND_ID,
   PORTS,
   SENSOR_MESSAGE_LENGTH,
   SENSOR_TYPE_RANGES,
@@ -16,6 +15,7 @@ export enum MessageType {
 
 export interface MotorCommand {
   id: MessageType.MotorCommand;
+  outputBits: number;
   motorA: number;
   motorB: number;
 }
@@ -33,9 +33,10 @@ export interface SensorNotification {
   samples: SensorSample[];
 }
 
-export function createMotorCommand(motorA: number, motorB: number): MotorCommand {
+export function createMotorCommand(outputBits: number, motorA: number, motorB: number): MotorCommand {
   return {
     id: MessageType.MotorCommand,
+    outputBits,
     motorA,
     motorB
   };
@@ -43,9 +44,9 @@ export function createMotorCommand(motorA: number, motorB: number): MotorCommand
 
 export function encodeMotorCommand(command: MotorCommand): number[] {
   const message = Buffer.alloc(9, 0x00);
-  message[1] = MOTOR_COMMAND_ID;
-  message[2] = command.motorA & 0xff;
-  message[3] = command.motorB & 0xff;
+  message[0] = command.outputBits & 0xff;
+  message[1] = command.motorA & 0xff;
+  message[2] = command.motorB & 0xff;
   return Array.from(message);
 }
 
