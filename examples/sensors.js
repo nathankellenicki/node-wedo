@@ -1,15 +1,13 @@
-const WeDo = require("..");
+import WeDo, { TiltEvent } from "../dist/index.js";
 
-const weDo = new WeDo.WeDo();
+const hub = new WeDo();
 
 (async () => {
-
-    weDo.connect();
-    weDo.on("distance", (port, { distance }) => {
+    await hub.connect();
+    hub.on("distance", ({ port, distance }) => {
         console.log("Distance", port, distance);
     });
-    weDo.on("tilt", (port, { tilt }) => {
+    hub.on("tilt", ({ port, tilt }) => {
         console.log("Tilt", port, tilt);
     });
-
 })();

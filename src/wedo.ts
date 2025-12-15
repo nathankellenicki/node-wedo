@@ -1,158 +1,383 @@
-import { EventEmitter} from "events";
-import crypto from "crypto";
-
+import { EventEmitter } from "events";
+import { createHash } from "crypto";
 import HID from "node-hid";
+import {
+  DISTANCE_SENSOR_MAX_VALUE,
+  DISTANCE_SENSOR_RAW_MAX,
+  DISTANCE_SENSOR_RAW_MIN,
+  MAX_MOTOR_POWER,
+  PORTS,
+  SensorType,
+  TILT_EVENT_RANGES,
+  TiltEvent,
+  type PortId,
+  WEDO_PRODUCT_ID,
+  WEDO_VENDOR_ID,
+  WeDoState
+} from "./constants";
+import { WeDoConnection } from "./connection";
+import type { SensorNotification } from "./protocol";
 
-import * as Consts from "./consts";
+export interface DiscoverOptions {
+  vendorId?: number;
+  productId?: number;
+}
 
-const VENDOR_ID = 0x0694;
-const PRODUCT_ID = 0x0003;
-const DISTANCE_SENSOR_IDS = [0xb0, 0xb1, 0xb2, 0xb3];
-const TILT_SENSOR_IDS = [0x26, 0x27];
+export interface WeDoOptions extends DiscoverOptions {
+  id?: string;
+  path?: string;
+}
 
+export interface WeDoDeviceInfo {
+  id: string;
+  path: string;
+  productId: number;
+  vendorId: number;
+  product?: string;
+  manufacturer?: string;
+  serialNumber?: string;
+}
 
-const MESSAGE_LENGTH = 8;
-const MAX_POWER = 127;
+interface BaseSensorPayload {
+  port: PortId;
+  rawValue: number;
+}
 
+export interface DistanceSensorPayload extends BaseSensorPayload {
+  kind: "distance";
+  distance: number;
+}
+
+export interface TiltSensorPayload extends BaseSensorPayload {
+  kind: "tilt";
+  tilt: TiltEvent;
+}
+
+export type WeDoSensorPayload = DistanceSensorPayload | TiltSensorPayload;
+
+export interface WeDoEventMap {
+  connected: (device: WeDoDeviceInfo) => void;
+  disconnected: () => void;
+  error: (error: Error) => void;
+  notification: (payload: WeDoSensorPayload) => void;
+  distance: (payload: DistanceSensorPayload) => void;
+  tilt: (payload: TiltSensorPayload) => void;
+}
+
+type RequiredDiscoverOptions = Required<Pick<DiscoverOptions, "vendorId" | "productId">>;
 
 export class WeDo extends EventEmitter {
+  public state: WeDoState = WeDoState.NotReady;
 
+  private readonly baseOptions: WeDoOptions;
+  private connection?: WeDoConnection;
+  private connectionHandlers?: {
+    ready: () => void;
+    disconnect: () => void;
+    error: (error: Error) => void;
+  };
+  private readonly handleSensorNotificationBound: (notification: SensorNotification) => void;
+  private lastSensorPayloads = new Map<string, WeDoSensorPayload>();
+  private readonly motorValues: Record<PortId, number> = {
+    A: 0,
+    B: 0
+  };
+  private connectedDevice?: WeDoDeviceInfo;
 
-    public state: Consts.State = Consts.State.NOT_READY;
+  constructor(options: WeDoOptions = {}) {
+    super();
+    this.baseOptions = { ...options };
+    this.handleSensorNotificationBound = (notification: SensorNotification) => {
+      this.handleSensorNotification(notification);
+    };
+  }
 
-    private _path: string | undefined;
-    private _hidDevice: HID.HID | undefined;
-    private _id: string | undefined;
-    private _messageBuffer: Buffer = Buffer.alloc(0);
+  public override on<U extends keyof WeDoEventMap>(event: U, listener: WeDoEventMap[U]): this;
+  public override on(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  public override on(event: string | symbol, listener: (...args: unknown[]) => void): this {
+    return super.on(event, listener);
+  }
 
-    private _sensorValues: number[] = new Array(2).fill(0);
-    private _motorValues: number[] = new Array(2).fill(0);
+  public override once<U extends keyof WeDoEventMap>(event: U, listener: WeDoEventMap[U]): this;
+  public override once(event: string | symbol, listener: (...args: unknown[]) => void): this;
+  public override once(event: string | symbol, listener: (...args: unknown[]) => void): this {
+    return super.once(event, listener);
+  }
 
+  public override emit<U extends keyof WeDoEventMap>(event: U, ...args: Parameters<WeDoEventMap[U]>): boolean;
+  public override emit(event: string | symbol, ...args: unknown[]): boolean;
+  public override emit(event: string | symbol, ...args: unknown[]): boolean {
+    return super.emit(event, ...args);
+  }
 
-    static discover () {
-        return HID
-            .devices()
-            .filter((device) => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID)
-            .map((device) => WeDo._makeId(device.path as string));
+  public get device(): WeDoDeviceInfo | undefined {
+    return this.connectedDevice;
+  }
+
+  public async connect(options?: WeDoOptions): Promise<void> {
+    if (this.connection) {
+      throw new Error("WeDo connection already open");
     }
-
-
-    static _makeId (path: string) {
-        const shasum = crypto.createHash("sha1");
-        shasum.update(path as string);
-        return shasum.digest("hex");
+    const resolvedOptions = this.resolveOptions(options);
+    const device = this.selectDevice(resolvedOptions);
+    const connection = new WeDoConnection(device.path);
+    this.attachConnection(connection, device);
+    try {
+      await connection.open();
+    } catch (error) {
+      this.detachConnection();
+      throw error;
     }
+  }
 
-
-    constructor (id?: string) {
-        super();
-        this._id = id;
+  public async disconnect(): Promise<void> {
+    const connection = this.connection;
+    if (!connection) {
+      if (this.connectedDevice) {
+        this.connectedDevice = undefined;
+        this.state = WeDoState.NotReady;
+        this.emit("disconnected");
+      }
+      return;
     }
-
-
-    get id () {
-        return this._id;
+    await connection.disconnect();
+    if (this.connection === connection) {
+      this.detachConnection();
+      if (this.connectedDevice) {
+        this.connectedDevice = undefined;
+        this.emit("disconnected");
+      }
+      this.state = WeDoState.NotReady;
     }
+  }
 
+  public setPower(port: PortId | string, power: number): void {
+    if (!this.connection || !this.connection.isReady) {
+      throw new Error("WeDo hub not connected");
+    }
+    const portId = this.normalizePort(port);
+    const rawPower = this.normalizePower(power);
+    this.motorValues[portId] = rawPower;
+    this.connection.sendMotorPower(this.motorValues.A, this.motorValues.B);
+  }
 
-    public connect () {
-        const devices = HID
-            .devices()
-            .filter((device) => device.vendorId === VENDOR_ID && device.productId === PRODUCT_ID);
-        let tempDevice;
-        for (const device of devices) {
-            const tempHubId = WeDo._makeId(device.path as string);
-            if (!this._id || this._id === tempHubId) {
-                tempDevice = device;
-            }
+  public sleep(delay: number): Promise<void> {
+    return new Promise((resolve) => {
+      setTimeout(resolve, delay);
+    });
+  }
+
+  public static discover(options: DiscoverOptions = {}): WeDoDeviceInfo[] {
+    const vendorId = options.vendorId ?? WEDO_VENDOR_ID;
+    const productId = options.productId ?? WEDO_PRODUCT_ID;
+    return HID.devices()
+      .filter((device) => device.vendorId === vendorId && device.productId === productId && device.path)
+      .map((device) => ({
+        id: WeDo.makeDeviceId(device.path!),
+        path: device.path!,
+        productId: device.productId!,
+        vendorId: device.vendorId!,
+        product: device.product,
+        manufacturer: device.manufacturer,
+        serialNumber: device.serialNumber
+      }));
+  }
+
+  public static makeDeviceId(path: string): string {
+    const hash = createHash("sha1");
+    hash.update(path);
+    return hash.digest("hex");
+  }
+
+  private attachConnection(connection: WeDoConnection, device: WeDoDeviceInfo): void {
+    const handleReady = () => {
+      this.state = WeDoState.Ready;
+      this.resetMotorValues();
+      this.connectedDevice = device;
+      this.lastSensorPayloads = new Map();
+      this.emit("connected", device);
+    };
+    const handleDisconnect = () => {
+      this.state = WeDoState.NotReady;
+      this.resetMotorValues();
+      this.connectedDevice = undefined;
+      this.lastSensorPayloads = new Map();
+      this.emit("disconnected");
+      this.detachConnection();
+    };
+    const handleError = (error: Error) => {
+      this.emit("error", error);
+    };
+    connection.once("ready", handleReady);
+    connection.on("disconnect", handleDisconnect);
+    connection.on("error", handleError);
+    connection.on("notification", this.handleSensorNotificationBound);
+    this.connectionHandlers = { ready: handleReady, disconnect: handleDisconnect, error: handleError };
+    this.connection = connection;
+  }
+
+  private detachConnection(): void {
+    if (!this.connection) {
+      return;
+    }
+    if (this.connectionHandlers) {
+      this.connection.removeListener("ready", this.connectionHandlers.ready);
+      this.connection.removeListener("disconnect", this.connectionHandlers.disconnect);
+      this.connection.removeListener("error", this.connectionHandlers.error);
+      this.connectionHandlers = undefined;
+    }
+    this.connection.removeListener("notification", this.handleSensorNotificationBound);
+    this.connection = undefined;
+  }
+
+  private handleSensorNotification(notification: SensorNotification): void {
+    notification.samples.forEach((sample) => {
+      switch (sample.sensorType) {
+        case SensorType.Distance: {
+          const distance = this.calculateDistance(sample.rawValue);
+          const payload: DistanceSensorPayload = {
+            kind: "distance",
+            port: sample.port,
+            rawValue: sample.rawValue,
+            distance
+          };
+          this.emitSensorPayload(payload);
+          break;
         }
-        if (!tempDevice) {
-            throw new Error("WeDo hub not found");
+        case SensorType.Tilt: {
+          const tilt = this.calculateTiltEvent(sample.rawValue);
+          const payload: TiltSensorPayload = {
+            kind: "tilt",
+            port: sample.port,
+            rawValue: sample.rawValue,
+            tilt
+          };
+          this.emitSensorPayload(payload);
+          break;
         }
-        this._id = WeDo._makeId(tempDevice.path as string);
-        this._path = tempDevice.path as string;
-        this._hidDevice = new HID.HID(this._path);
-        this._hidDevice.on("data", this._handleIncomingData.bind(this));
+        default:
+          break;
+      }
+    });
+  }
+
+  private normalizePort(port: PortId | string): PortId {
+    const normalized = port.toString().trim().toUpperCase();
+    const index = PORTS.indexOf(normalized as PortId);
+    if (index === -1) {
+      throw new Error(`Unknown WeDo port '${port}'`);
     }
+    return PORTS[index];
+  }
 
-
-    public setPower (port: string, power: number) {
-        if (!this._hidDevice) {
-            throw new Error("WeDo hub not connected");
-        }
-        if (0 < power && power <= 100) {
-            power = Math.floor(power * MAX_POWER / 100);
-        }
-        if (-100 <= power && power < 0) {
-            power = Math.ceil(power * MAX_POWER / 100);
-          }
-        this._motorValues[port === "A" ? 0 : 1] = power;
-        const message = [0x0, 0x40, this._motorValues[0] & 0xff, this._motorValues[1] & 0xff, 0x00, 0x00, 0x00, 0x00, 0x00];
-            this._hidDevice.write(message);
+  private normalizePower(power: number): number {
+    if (!Number.isFinite(power)) {
+      return 0;
     }
-
-
-    public sleep (delay: number) {
-        return new Promise((resolve) => {
-            setTimeout(resolve, delay);
-        });
+    if (Math.abs(power) <= 100) {
+      return Math.max(-MAX_MOTOR_POWER, Math.min(MAX_MOTOR_POWER, Math.round((power / 100) * MAX_MOTOR_POWER)));
     }
+    return Math.max(-MAX_MOTOR_POWER, Math.min(MAX_MOTOR_POWER, Math.round(power)));
+  }
 
-
-    private _handleIncomingData (data?: Buffer) {
-        if (data) {
-            if (!this._messageBuffer) {
-                this._messageBuffer = data;
-            } else {
-                this._messageBuffer = Buffer.concat([this._messageBuffer, data]);
-            }
-        }
-        if (this._messageBuffer.length <= 0) {
-            return;
-        }
-        if (this._messageBuffer.length >= MESSAGE_LENGTH) {
-            const message = this._messageBuffer.slice(0, MESSAGE_LENGTH);
-            this._messageBuffer = this._messageBuffer.slice(MESSAGE_LENGTH);
-            this._parseMessage(message);
-            if (this._messageBuffer.length > 0) {
-                this._handleIncomingData();
-            }
-        }
+  private calculateDistance(rawValue: number): number {
+    const span = DISTANCE_SENSOR_RAW_MAX - DISTANCE_SENSOR_RAW_MIN;
+    if (!Number.isFinite(rawValue) || span <= 0) {
+      return 0;
     }
+    const clamped = Math.max(DISTANCE_SENSOR_RAW_MIN, Math.min(DISTANCE_SENSOR_RAW_MAX, rawValue));
+    const normalized = (clamped - DISTANCE_SENSOR_RAW_MIN) / span;
+    return Math.round(normalized * DISTANCE_SENSOR_MAX_VALUE);
+  }
 
-
-    private _parseMessage (message: Buffer) {
-        this._parseSensorData(0, message[3], message[2]);
-        this._parseSensorData(1, message[5], message[4]);
+  private calculateTiltEvent(value: number): TiltEvent {
+    if (!Number.isFinite(value)) {
+      return TiltEvent.Unknown;
     }
-
-
-    private _parseSensorData(port: number, type: number, data: number) {
-        if (this._sensorValues[port] !== data) {
-            const portName = port === 0 ? "A" : "B";
-            if (DISTANCE_SENSOR_IDS.indexOf(type) >= 0) {
-                this._sensorValues[port] = data;
-                this.emit("distance", portName, { distance: data });
-                return;
-            }
-            if (TILT_SENSOR_IDS.indexOf(type) >= 0) {
-                let tilt = Consts.TiltEvent.NONE;
-                if (10 <= data && data <= 40) {
-                    tilt = Consts.TiltEvent.BACK;
-                } else if (60 <= data && data <= 90) {
-                    tilt = Consts.TiltEvent.RIGHT;
-                } else if (170 <= data && data <= 190) {
-                    tilt = Consts.TiltEvent.FORWARD;
-                } else if (220 <= data && data <= 240) {
-                    tilt = Consts.TiltEvent.LEFT;
-                }
-                if (this._sensorValues[port] !== tilt) {
-                    this._sensorValues[port] = tilt;
-                    this.emit("tilt", portName, { tilt });
-                }
-                return;
-            }
-        }
+    for (const range of TILT_EVENT_RANGES) {
+      if (value <= range.max) {
+        return range.event;
+      }
     }
+    return TiltEvent.Unknown;
+  }
 
+  private emitSensorPayload(payload: WeDoSensorPayload): void {
+    if (!this.shouldEmitPayload(payload)) {
+      return;
+    }
+    this.emit("notification", payload);
+    if (payload.kind === "distance") {
+      this.emit("distance", payload);
+    } else if (payload.kind === "tilt") {
+      this.emit("tilt", payload);
+    }
+  }
+
+  private shouldEmitPayload(payload: WeDoSensorPayload): boolean {
+    const key = this.getPayloadKey(payload);
+    const previous = this.lastSensorPayloads.get(key);
+    if (previous && this.sensorPayloadsEqual(previous, payload)) {
+      return false;
+    }
+    this.lastSensorPayloads.set(key, payload);
+    return true;
+  }
+
+  private getPayloadKey(payload: WeDoSensorPayload): string {
+    return `${payload.kind}:${payload.port}`;
+  }
+
+  private sensorPayloadsEqual(a: WeDoSensorPayload, b: WeDoSensorPayload): boolean {
+    if (a.kind !== b.kind || a.port !== b.port) {
+      return false;
+    }
+    switch (a.kind) {
+      case "distance":
+        return b.kind === "distance" && a.distance === b.distance;
+      case "tilt":
+        return b.kind === "tilt" && a.tilt === b.tilt;
+      default:
+        return false;
+    }
+  }
+
+  private resolveOptions(overrides?: WeDoOptions): RequiredDiscoverOptions & WeDoOptions {
+    return {
+      vendorId: overrides?.vendorId ?? this.baseOptions.vendorId ?? WEDO_VENDOR_ID,
+      productId: overrides?.productId ?? this.baseOptions.productId ?? WEDO_PRODUCT_ID,
+      id: overrides?.id ?? this.baseOptions.id,
+      path: overrides?.path ?? this.baseOptions.path
+    };
+  }
+
+  private selectDevice(options: RequiredDiscoverOptions & WeDoOptions): WeDoDeviceInfo {
+    const devices = WeDo.discover({
+      vendorId: options.vendorId,
+      productId: options.productId
+    });
+    if (options.path) {
+      const device = devices.find((candidate) => candidate.path === options.path);
+      if (device) {
+        return device;
+      }
+      throw new Error(`No WeDo hub found at path '${options.path}'`);
+    }
+    if (options.id) {
+      const device = devices.find((candidate) => candidate.id === options.id);
+      if (device) {
+        return device;
+      }
+      throw new Error(`No WeDo hub found with id '${options.id}'`);
+    }
+    if (devices.length === 0) {
+      throw new Error("No WeDo hubs detected");
+    }
+    return devices[0];
+  }
+
+  private resetMotorValues(): void {
+    this.motorValues.A = 0;
+    this.motorValues.B = 0;
+  }
 }
