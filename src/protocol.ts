@@ -44,9 +44,10 @@ export function createMotorCommand(outputBits: number, motorA: number, motorB: n
 
 export function encodeMotorCommand(command: MotorCommand): number[] {
   const message = Buffer.alloc(9, 0x00);
-  message[0] = command.outputBits & 0xff;
-  message[1] = command.motorA & 0xff;
-  message[2] = command.motorB & 0xff;
+  message[0] = 0x00; // HID Report ID
+  message[1] = command.outputBits & 0xff;
+  message[2] = command.motorA & 0xff;
+  message[3] = command.motorB & 0xff;
   return Array.from(message);
 }
 
